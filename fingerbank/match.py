@@ -10,81 +10,172 @@ from fingerbank.parser import (
         create_systems_and_groups
         )
 
-class Test(object):
-    name = 'test'
-    description = 'always returns None for everything because this is baseclass'
+from difflib import SequenceMatcher
+from collections import namedtuple
+from timeit import timeit
 
-    def __init__(self):
-        self.results = None
 
-    def run(self, fp_to_match, fp):
-        """
-        test to see if fp somehow relates to fp_to_match
-        """
-        return None
+class Test(namedtuple('Test', 'desc compare reduce')):
+    """
+    Use the Test class to group comparison functions with reduce functions.
+    The comparison function compares two fingerprints and returns some assesment
+    of how similar they are.
 
-    def filter_results(self, results):
-        """
-        given a hash of all results data, return just the systems or fingerprints
-        that we care about.
+    The reduce function takes an iterable of Result tuples (system,
+    fingerprint, comparison result) and returns a list of only the interesting
+    results. The simplest possible reduce function is `list`
+    """
+    pass
 
-        Results is a hash like this:
-        {
-            # one of these for each fingerprint (!)
-            '1,2,3,4,5' -> {
-                'system' -> <System object>
-                'test_name' -> result of test_name.run()
-                'test_name_2' -> result of test_name_2()
-            },
-            ...
-        }
+
+class Result(namedtuple('Result', 'system fingerprint value')):
+    def _for_test(self, some_test):
         """
-        return None
+        by convention the `value` member is a hash from test -> comparison result.
+        this function returns a Result with just the comparison result for the
+        given test.
+        """
+        return Result(self.system, self.fingerprint, self.value[some_test])
 
 # this is a little java-y
 # blarg
 class Matcher(object):
-    def __init__(self, systems):
+    def __init__(self, systems, tests):
         self.systems = systems
+        self.tests = tests
 
-    def process(self, fp_to_match, tests):
+    def match(self, fp_to_match):
+        """
+        matches fp against all the fingerprints in this matcher's systems using
+        the tests.
+        :param fp_to_match: string. DHCP options fingerprint
+        :param tests: list of comparason functions. These functions take two
+            values and return some assessment of the similarity, which can be
+            anything.
+        """
+        results = {} # TODO: convert to map?
         for system in self.systems:
             # for each of the fingerprints, run each check
             for fp in system.fingerprints:
-                results[fp] = dict(system=system)
-                for test in tests:
-                    results[fp][test.name] = test.run(fp_to_match, fp)
+                results[fp] = res = Result(system, fp, {})
+                # store the check result keyed to the check
+                for test in self.tests:
+                    res.value[test] = test.compare(fp_to_match, fp)
+        self.results = results
+        return results
 
-    def gather_results(self, results, tests):
-        per_test_results = {}
-        for test in tests:
-            per_test_results[test] = test.filter_results(results)
-        return per_test_results
+    def reduce(self, results=None):
+        results = (results or self.results).values()
+        final = []
+        for test in self.tests:
+            final.append((test.desc, 
+                test.reduce(r._for_test(test) for r in results)
+                ))
+        return final
+
+
+def option_set(fp):
+    """set of all the options in a fingerprint"""
+    return set(fp.split(','))
+
+
+def count_identical_matches(a, b):
+    """
+    returns the number of options both a and b share
+    :param a: comma seperated fingerprint
+    :param b: comma seperated fingerprint
+    """
+    a = option_set(a)
+    b = option_set(b)
+    return len(a & b) # & is intersecion
+
+
+def perfect_match(a, b):
+    """
+    returns true if a and b are a perfect match
+    :param a: comma seperated fingerprint
+    :param b: comma seperated fingerprint
+    """
+    return a == b
+
+
+def largest_common_subsequence(a, b, worth_considering=0.5):
+    """
+    returns a ratio between 0..1 of how similar two fingerprints are.
+    because actually computing the subsequenes can be very slow, we do some
+    quick ratio bound checking to make sure it wasn't shit
+
+    :param a: comma seperated fingerprint
+    :param b: comma seperated fingerprint
+    """
+    a, b = a.split(','), b.split(',')
+    sm = SequenceMatcher(lambda x: x == '\n', a, b)
+    upper_bound = sm.quick_ratio()
+    if upper_bound >= worth_considering:
+        return sm.ratio()
+    return upper_bound
+
+
+def top_5(results):
+    """
+    return the top 5 results as sorted by python
+    """
+    return sorted(results, reverse=True, key=lambda r: r.value)[0:4]
+
+
+def all_true(results):
+    """
+    return all results with true values
+    """
+    return filter(lambda r: r.value, results)
+
+
+def return_all(results):
+    """
+    just return everything
+    """
+    return list(results)
+
 
 def main(conf_file_name, fp_to_match):
     cfg = parse_config_with_heredocs(conf_file_name)
     systems, _ = create_systems_and_groups(cfg)
-    matcher = Matcher(systems)
-    tests = [ Test() ]
+    
+    similarity_ratio = Test('Similarity', largest_common_subsequence, top_5)
+    exact_matches = Test('All exact matches', perfect_match, all_true)
+    same_options = Test('Fingerprints with matching options',
+            count_identical_matches, top_5)
+    
+    tests = [exact_matches, similarity_ratio, same_options]
+    matcher = Matcher(systems, tests)
 
-    raw_results = matcher.process(fp_to_match, tests)
-    per_test_result = matcher.gather_results(raw_results, tests)
+    print("Fingerprint: {0}".format(fp_to_match))
 
-    for test in tests:
-       print("\nTest: {test} results".format(test=test.name))
-       print("Description: {desc}".format(desc=test.description))
+    reduced = []
+    def do_things():
+        raw_results = matcher.match(fp_to_match)
+        reduced.append(matcher.reduce(raw_results))
 
-       if not (per_test_result[test]):
-           print "No results..."
-           continue
+    t = timeit(do_things, number=1)
+    reduced = reduced[0]
+    print("matching {sys} systems with {tests} tests took {t} seconds".format(
+        sys=len(systems),
+        tests=len(tests),
+        t=t))
 
-       # TODO: rework to have the actual fingerprint
-       # TODO: rewrite everything to make it actually make sense
-       #       and not be hella convoluted
-       for res in per_test_result[test]:
-           sys = res['system']
-           print("{os_desc} (os {num}): {fp}\n{res}".format(
-               os_desc=sys.description,
-               num=sys.num,
-               fp='oops need to index by fingerprints',
-               res='nah'))
+    for test, results in reduced:
+        print("\nTest: {0} vs {1}".format(test, fp_to_match))
+        if not results:
+            print("No results...")
+            continue
+
+        for r in results:
+           print("{os_desc} (os {num}): {fp}\n    {res}".format(
+               os_desc=r.system.description,
+               num=r.system.number,
+               fp=r.fingerprint,
+               res=r.value))
+
+if __name__ == '__main__':
+    import sys
+    main(sys.argv[1], sys.argv[2])
