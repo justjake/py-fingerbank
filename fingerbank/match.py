@@ -61,15 +61,47 @@ class Matcher(object):
                 for test in self.tests:
                     res.value[test] = test.compare(fp_to_match, fp)
         self.results = results
-        return results
+        return MatcherResults(self, results, fp_to_match)
 
-    def reduce(self, results=None):
-        results = results or self.results
+
+class MatcherResults(object):
+    def __init__(self, matcher, res, fp):
+        self._results = res
+        self._matcher = matcher
+        self._fp = fp
+
+    @property
+    def reduced(self):
+        if hasattr(self, '_reduced'):
+            return self._reduced
+        return self.reduce()
+
+    def format(self):
+        fp_to_match = self._fp
+        lines = []
+        for test, results in self.reduced:
+            lines.append("\nTest: {0} vs {1}".format(test, fp_to_match))
+            if not results:
+                lines.append("No results...")
+                continue
+
+            for r in results:
+               lines.append("{os_desc} (os {num}): {fp}\n    {res}".format(
+                   os_desc=r.system.description,
+                   num=r.system.number,
+                   fp=r.fingerprint,
+                   res=r.value))
+
+        return '\n'.join(lines)
+
+    def reduce(self):
+        results = self._results
         final = []
-        for test in self.tests:
+        for test in self._matcher.tests:
             final.append((test.desc, 
                 test.reduce(r._for_test(test) for r in results)
                 ))
+        self._reduced = final
         return final
 
 
@@ -148,12 +180,14 @@ def main(conf_file_name, fp_to_match):
     tests = [exact_matches, similarity_ratio, same_options]
     matcher = Matcher(systems, tests)
 
+
     print("Fingerprint: {0}".format(fp_to_match))
 
     reduced = []
     def do_things():
-        raw_results = matcher.match(fp_to_match)
-        reduced.append(matcher.reduce(raw_results))
+        res = matcher.match(fp_to_match)
+        res.reduce()
+        reduced.append(res)
 
     t = timeit(do_things, number=1)
     reduced = reduced[0]
@@ -162,18 +196,8 @@ def main(conf_file_name, fp_to_match):
         tests=len(tests),
         t=t))
 
-    for test, results in reduced:
-        print("\nTest: {0} vs {1}".format(test, fp_to_match))
-        if not results:
-            print("No results...")
-            continue
+    print(reduced.format())
 
-        for r in results:
-           print("{os_desc} (os {num}): {fp}\n    {res}".format(
-               os_desc=r.system.description,
-               num=r.system.number,
-               fp=r.fingerprint,
-               res=r.value))
 
 if __name__ == '__main__':
     import sys
