@@ -6,9 +6,7 @@ Supports several strategies to do so and adding new ones should be relatively ea
 """
 
 from fingerbank.parser import (
-        FINGERPRINTS, _build_system, parse_config_with_heredocs,
-        create_systems_and_groups
-        )
+        parse_config_with_heredocs, create_systems_and_groups)
 
 from difflib import SequenceMatcher
 from collections import namedtuple
@@ -53,11 +51,12 @@ class Matcher(object):
             values and return some assessment of the similarity, which can be
             anything.
         """
-        results = {} # TODO: convert to map?
+        results = []
         for system in self.systems:
             # for each of the fingerprints, run each check
             for fp in system.fingerprints:
-                results[fp] = res = Result(system, fp, {})
+                res = Result(system, fp, {})
+                results.append(res)
                 # store the check result keyed to the check
                 for test in self.tests:
                     res.value[test] = test.compare(fp_to_match, fp)
@@ -65,7 +64,7 @@ class Matcher(object):
         return results
 
     def reduce(self, results=None):
-        results = (results or self.results).values()
+        results = results or self.results
         final = []
         for test in self.tests:
             final.append((test.desc, 
