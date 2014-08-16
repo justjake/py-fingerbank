@@ -3,7 +3,7 @@ import ConfigParser
 import re
 import logging
 
-from fingerbank.database import System, Group
+from fingerbank.objects import System, Group
 
 EMPTY = re.compile(r'\s*\n')
 COMMENT = re.compile(r'^\s*#')
@@ -111,10 +111,11 @@ def _build_group(cfg, section_name):
     n = GROUP.match(section_name).group(1)
     desc = cfg.get(section_name, DESC)
     mems = cfg.get(section_name, MEMBERS)
-    ranges = mems.split(',')
-    # TODO: handle more than one range
-    start, end = ranges[0].split('-')
-    return Group(n, desc, start, end)
+    # get lo, hi pairs
+    ranges = [r.split('-') for r in mems.split(',')]
+    # parse into tuples
+    ranges = [(int(lo), int(hi)) for lo, hi in ranges]
+    return Group(n, desc, ranges)
 
 
 def create_systems_and_groups(cfg):
