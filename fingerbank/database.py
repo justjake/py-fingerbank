@@ -1,157 +1,183 @@
 """A database of DHCP fingerprints"""
-from collections import defaultdict
+from fingerbank.objects import Group, System
+from bisect import bisect_left
 
+class RangeP(object):
+    """
+    range pair. the purpose of this class is to provide a nice way to binary
+    search a list of somethings to find the range that contains an int. this
+    is the something.
 
-class HashTree(object):
-    """a dictionary structure made of a tree of HashTrees"""
-    def __init__(self, value=None):
-        self.subtree = {}
-        self.value = value
+    We do all these contortions so we can 
+
+    See GroupLookup for a usage example.
+    """
+    def __init__(self, lo, hi):
+        """
+        Create a new range with a lower and upper bound, inclusive
+
+        >>> p = RangeP(5, 10)
+        >>> p.hi == 10
+        True
+        >>> p.lo == 5
+        True
+        >>> p2 = RangeP(10, 5)
+        Traceback (most recent call last):
+            ...
+        ValueError: range cannot have lo 10 > hi 5
+        """
+        if lo > hi:
+            raise ValueError("range cannot have lo {l} > hi {h}".format(
+                l=lo, h=hi))
+        self.lo = lo
+        self.hi = hi
 
     def __str__(self):
-        return '<HashTree {0}, {1}>'.format(
-            repr(self.value), repr(self.subtree))
+        """
+        >>> str(RangeP(5, 10))
+        '(5..10)'
+        """
+        return "({0}..{1})".format(self.lo, self.hi)
 
     def __repr__(self):
-        return str(self)
+        """
+        >>> repr(RangeP(5, 10))
+        'RangeP(5, 10)'
+        """
+        return "RangeP({lo}, {hi})".format(
+                lo=repr(self.lo), hi=repr(self.hi))
 
-    def put(self, path, value):
+    def __cmp__(self, other):
         """
-        put a value at a given path
-        :param path: list of keys
-        :param value: the value to store
-        >>> ht = HashTree()
-        >>> ht.put([1,2,3], "hello")
+        Kinda a hack. When a RangeP is compared to an it, it is considered equal
+        if the int is in the range.
+
+        Otherwise, ranges compared by adjoining endpoints, and if they intersect,
+        we freak the fuck out.
+
+        >>> hi = RangeP(50, 100)
+        >>> lo = RangeP(1, 49)
+
+        range v range checks
+        >>> hi > lo
+        True
+        >>> lo < hi
+        True
+        >>> hi == lo
+        False
+
+        range v number checks
+        >>> hi == 5
+        False
+        >>> hi == 55
+        True
+        >>> hi > 200
+        False
+        >>> hi > 5
+        True
+        >>> hi < 200
+        True
+        >>> hi < 5
+        False
+
+        intersecting ranges are evil
+        >>> lo = RangeP(1, 55)
+        >>> hi > lo
+        Traceback (most recent call last):
+            ...
+        ValueError: ranges intersect! (50..100), (1..55)
+        >>> lo < hi
+        Traceback (most recent call last):
+            ...
+        ValueError: ranges intersect! (1..55), (50..100)
         """
-        if len(path) == 0:
-            self.value = value
+        if isinstance(other, int):
+            if self.hi < other:
+                return -1
+            if self.lo > other:
+                return 1
+            return 0 # consider equal to an int if we contain it
+
+        # handle non-intersecting ranges
+        if self.hi < other.lo:
+            return -1
+
+        if self.lo > other.hi:
+            return 1
+
+        if self.lo == other.lo and self.hi == other.hi:
+            return 0
+
+        # otherwise freak out
+        raise ValueError("ranges intersect! {0}, {1}".format(self, other))
+
+    def includes(self, n):
+        """true iff n is in this range"""
+        return self.lo <= n <= self.hi
+
+
+class GroupLookup(object):
+    """
+    better-than-linear-search group lookup.
+    """
+    def __init__(self, groups):
+        if groups is None:
             return
 
-        # put it into child
-        first = path[0]
-        rest = path[1:]
-        # create children if needed
-        if first not in self.subtree:
-            self.subtree[first] = HashTree()
-        self.subtree[first].put(rest, value)
+        ranges = []
+        self.range_to_group = {}
+        for group in groups:
+            for lo, hi in group.ranges:
+                rp = RangeP(lo, hi)
+                self.range_to_group[rp] = group
+                ranges.append(rp)
 
-    def get(self, path):
+        # ranges pre-sorted
+        self.ranges = sorted(ranges)
+
+    @staticmethod
+    def binary_search(a, x, lo=0, hi=None):
         """
-        retrieve a value from a given path
-        :param path: list of keys
-        >>> ht = HashTree()
-        >>> ht.put([1,2,3], "hello")
-        >>> ht.get([1,2,3])
-        "hello"
+        find the position of element x in array a, between lo and hi.
+        returns -1 if x was not found, and the index of x otherwise.
+        uses built-in comparators.
+        >>> gl = GroupLookup(None)
+        >>> a = [0,1,2,3,4,5]
+        >>> x = 3
+        >>> gl.binary_search(a, x)
+        3
+        >>> gl.binary_search(a, 500)
+        -1
         """
-        if len(path) == 0:
-            return self.value
-
-        return self.subtree[path[0]].get(path[1:])
-
-
-class DummyHashTree(object):
-    """implements HashTree's interface using a normal map"""
-    def __init__(self):
-        self.vals = {}
-
-    def put(self, path, value):
-        path = ','.join(path)
-        self.vals[path] = value
-
-    def get(self, path):
-        path = ','.join(path)
-        if path not in self.vals:
+        hi = hi or len(a)
+        # bisect_left is fast bisection insert search
+        # see http://hg.python.org/cpython/file/2.7/Lib/bisect.py
+        pos = bisect_left(a, x, lo, hi)
+        if pos != hi and a[pos] == x:
+            return pos
+        else:
+            return -1 # not found
+        
+    def get_group(self, system):
+        pos = self.binary_search(self.ranges, system.number)
+        if pos == -1:
             return None
-        return self.vals[path]
+        rp = self.ranges[pos]
+        return self.range_to_group[rp]
 
 
-class Group(object):
+class SystemLookup(object):
     """
-    a group of systems in fingerbank's conf.
-    the conf has groups with multiple ranges, but we don't support those yet.
+    fingerprint-to-system hashmap
     """
-    def __init__(self, num, desc, start, end):
-        self.number = int(num)
-        self.description = desc
-        self.start = int(start)
-        self.end = int(end)
+    def __init__(self, systems):
+        self.fps = {}
+        for sys in systems:
+            for fp in sys.fingerprints:
+                self.fps[fp] = sys
 
-    def __repr__(self):
-        return 'Group({num}, {desc}, {start}, {end})'.format(
-            num=repr(self.number),
-            desc=repr(self.description),
-            start=repr(self.start),
-            end=repr(self.end))
+    def get_system(self, fingerprint):
+        if fingerprint not in self.fps:
+            return None
 
-
-class System(object):
-    """an operating system with a bunch of DHCP fingerprints"""
-    def __init__(self, num, desc, fprints, vendor=None):
-        self.number = int(num)
-        self.description = desc
-
-        if isinstance(fprints, str):
-            fprints = fprints.split('\n')
-        self.fingerprints = fprints
-        self.vendor_id = vendor
-
-    def __repr__(self):
-        return 'System({num}, {desc})'.format(
-            num=repr(self.number), desc=repr(self.description))
-
-
-class Database(object):
-    """
-    fast lookups for fingerprints.
-    I'm not sure this implementation is very good; I'm still toying with it.
-    I may go for a straight-up port of fingerbank's tools instead.
-    """
-    def __init__(self, systems=None, groups=None):
-        self.vendors = defaultdict(lambda: set())
-        self.fp_lookup = DummyHashTree()
-        self.systems = {}
-        self.groups = {}
-
-        if systems:
-            for sys in systems:
-                self.add_system(sys)
-
-        if groups:
-            for g in groups:
-                self.add_group(g)
-
-    def exact_match(self, fingerprint):
-        """
-        return the operating system for a given fingerprint
-        """
-        if isinstance(fingerprint, str):
-            fingerprint = fingerprint.split(',')
-
-        return self.fp_lookup.get(fingerprint)
-
-    def add_system(self, system):
-        # add to vendor grouping if we have one
-        if system.vendor_id:
-            self.vendors[system.vendor_id].add(system)
-
-        # insert into path by each fingerprint (not sure if it works like dis)?
-        for fp in system.fingerprints:
-            path = fp.split(',')
-            self.fp_lookup.put(path, system)
-
-        self.systems[system.number] = system
-
-    def add_group(self, group):
-        self.groups[group.number] = group
-
-    def get_group_for_system(self, system):
-        """
-        given a system, retrieve it's group
-        """
-        def f(group):
-            return group.start <= system.number and group.end >= system.number
-        candidates = filter(f, self.systems.values())
-        if len(candidates):
-            return candidates[0]
-        return None
+        return self.fps[fingerprint]
